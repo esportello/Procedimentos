@@ -1,0 +1,255 @@
+CLUSTER KUBERNETES COM KUBEADM + CRI-O + FLANNEL (01 Master/Control PLane e 02 Work Nodes) - Ubuntu 22.04 LTS
+#############################################################################################################
+
+1) Logar como root nos servidores do cluster
+
+2)
+Verificar qual a versão do Cgroup
+
+stat -fc %T /sys/fs/cgroup/
+
+# para v1 --> tmpfs
+# para v2 --> cgroup2fs
+
+# Não testei, mas para habilitar o v2 do cgroups, é necessário adicionar "systemd.unified_cgroup_hierarchy=1" ao kernel via linha de comando
+# No Ubuntu 20.04 LTS a versão do cgroup é a 1 e o Kubernetes de forma default, funciona apenas com a versão 2.
+# No Ubuntu 22.04 LTS a versão do cgroup é a 2. A instalação do Kubernetes de forma padrão funcionou sem problemas.
+
+PRÉ-REQUISITOS COMUNS (Master/Control Plane e Work Nodes)
+#########################################################
+
+3)
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+
+4)
+modprobe overlay
+modprobe br_netfilter
+
+5)
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+6)
+sysctl --system
+
+7)
+Validar as configurações realizadas dos passos 3 a 6
+
+lsmod | grep br_netfilter
+lsmod | grep overlay
+sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.ipv4.ip_forward
+
+INSTALAÇÃO DO CRI-O
+###################
+
+8)
+
+apt update
+
+9)
+Adicionar duas variáveis de ambiente que serão utilizadas para a configuração dos respositórios do CRI-O
+
+OS=(pegar no site https://cri-o.io/ o valor referente a versão do SO)
+A versão do CRI-O DEVE ser a mesma da versão do Kubernetes, ou seja, se for instalar a versão 1.26 do Kubernetes a versão do CRI-O deverá ser a mesma.
+Portanto, o valor da variável VERSION também deverá ser 1.26.
+
+OS=xUbuntu_22.04
+VERSION=1.27
+
+10)
+
+Adição/Configuração das chaves e repositórios para o CRI-O
+
+echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.list
+
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/Release.key | apt-key add -
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/Release.key | apt-key add -
+
+
+11)
+
+Atualizar os repositórios do servidor
+
+apt update
+
+12)
+
+Instalação dos pacotes do CRI-O
+
+mkdir -p /var/lib/crio
+
+apt install cri-o cri-o-runc cri-tools containernetworking-plugins
+
+13)
+Configuração adicional no arquivo crio.conf
+
+cd /etc/crio/crio.conf
+
+Remover o comentário da linha
+pause_image = "registry.k8s.io/pause:3.9"
+
+14)
+
+Habilitar e Iniciar o serviço do CRI-O
+
+systemctl enable crio.service
+systemctl start crio.service
+systemctl status crio.service
+
+crio --version
+
+INSTALAÇÃO DO KUBEADM KUBELET E KUBECTL
+#######################################
+
+15)
+
+Criar a pasta /etc/apt/keyrings caso não esteja ainda criada
+
+mkdir -p /etc/apt/keyrings
+
+16)
+Instalação de alguns pacotes necessários
+
+apt install apt-transport-https ca-certificates curl -y
+
+17)
+
+Adição/Configuração das chaves e repositórios para o Kubernetes
+
+curl -fsSL https://dl.k8s.io/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+18)
+
+Atualizar os repositórios do servidor
+
+apt update
+
+19)
+
+Instalação dos pacotes
+
+apt install kubelet kubeadm kubectl -y
+
+INICIALIZAÇÃO DO CLUSTER (Executar apenas no Master/Control Plane)
+
+20)
+
+kubeadm init --pod-network-cidr=10.244.0.0/16 --control-plane-endpoint=172.100.100.100 --apiserver-advertise-address=172.100.100.100
+
+# pod-network-cidr --> 10.244.0.0/16 será utilizado pelo Flannel (precisa ser essa rede /16)
+# control-plane-endpoint=<ip do servidor>
+# apiserver-advertise-address=<ip do servidor>
+
+21)
+
+Configurações recomendadas após inicilização do CLUSTER
+
+mkdir -p $HOME/.kube
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+chown $(id -u):$(id -g) $HOME/.kube/config
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+22)
+
+Capturar o token para configurar nos work Nodes
+
+kubeadm token create --print-join-command
+
+# Executar a saída deste comando em todos os Work Nodes
+
+23)
+
+Validar o status atual do Cluster
+
+kubectl get nodes -o wide
+kubectl get all -n kube-system
+
+Provavelmente todos os nodes estarão com o status Not Ready. Isso é devido a necessidade de um CNI.
+
+INSTALAR o POD DO CNI (FLANNEL - https://github.com/flannel-io/flannel)
+#######################################################################
+
+24)
+
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+
+25)
+
+Validar o status atual do Cluster
+
+kubectl get nodes -o wide
+kubectl get all -n kube-system
+kubectl get all -n kube-flannel
+kubectl get pods all-namespaces
+
+
+# root@node1:~# kubectl get nodes -o wide
+# NAME    STATUS   ROLES           AGE    VERSION   INTERNAL-IP       EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
+# node1   Ready    control-plane   5h5m   v1.27.4   172.100.100.100   <none>        Ubuntu 22.04.3 LTS   5.15.0-78-generic   cri-o://1.27.1
+# node2   Ready    <none>          5h4m   v1.27.4   172.100.100.110   <none>        Ubuntu 22.04.3 LTS   5.15.0-78-generic   cri-o://1.27.1
+# node3   Ready    <none>          5h4m   v1.27.4   172.100.100.120   <none>        Ubuntu 22.04.3 LTS   5.15.0-78-generic   cri-o://1.27.1
+
+#######################--------#######################--------#######################--------#######################
+#######################--------#######################--------#######################--------#######################
+
+# root@node1:~# kubectl get all -n kube-system
+# NAME                                READY   STATUS    RESTARTS   AGE
+# pod/coredns-5d78c9869d-6jpbq        1/1     Running   0          5h7m
+# pod/coredns-5d78c9869d-r6rkn        1/1     Running   0          5h7m
+# pod/etcd-node1                      1/1     Running   0          5h7m
+# pod/kube-apiserver-node1            1/1     Running   0          5h7m
+# pod/kube-controller-manager-node1   1/1     Running   2          5h7m
+# pod/kube-proxy-g878t                1/1     Running   0          5h7m
+# pod/kube-proxy-q2htw                1/1     Running   0          5h6m
+# pod/kube-proxy-s647v                1/1     Running   0          5h6m
+# pod/kube-scheduler-node1            1/1     Running   7          5h7m
+
+# NAME               TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE
+# service/kube-dns   ClusterIP   10.96.0.10   <none>        53/UDP,53/TCP,9153/TCP   5h7m
+
+# NAME                        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+# daemonset.apps/kube-proxy   3         3         3       3            3           kubernetes.io/os=linux   5h7m
+
+# NAME                      READY   UP-TO-DATE   AVAILABLE   AGE
+# deployment.apps/coredns   2/2     2            2           5h7m
+
+# NAME                                 DESIRED   CURRENT   READY   AGE
+# replicaset.apps/coredns-5d78c9869d   2         2         2       5h7m
+
+#######################--------#######################--------#######################--------#######################
+#######################--------#######################--------#######################--------#######################
+
+# root@node1:~# kubectl get all -n kube-flannel
+# NAME                        READY   STATUS    RESTARTS   AGE
+# pod/kube-flannel-ds-2rpjt   1/1     Running   0          5h10m
+# pod/kube-flannel-ds-4rjsk   1/1     Running   0          5h10m
+# pod/kube-flannel-ds-pnrrk   1/1     Running   0          5h10m
+
+# NAME                             DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+# daemonset.apps/kube-flannel-ds   3         3         3       3            3           <none>          5h10m
+
+#######################--------#######################--------#######################--------#######################
+#######################--------#######################--------#######################--------#######################
+
+# root@node1:~# kubectl get pods --all-namespaces
+# NAMESPACE      NAME                            READY   STATUS    RESTARTS   AGE
+# kube-flannel   kube-flannel-ds-2rpjt           1/1     Running   0          4h55m
+# kube-flannel   kube-flannel-ds-4rjsk           1/1     Running   0          4h55m
+# kube-flannel   kube-flannel-ds-pnrrk           1/1     Running   0          4h55m
+# kube-system    coredns-5d78c9869d-6jpbq        1/1     Running   0          5h5m
+# kube-system    coredns-5d78c9869d-r6rkn        1/1     Running   0          5h5m
+# kube-system    etcd-node1                      1/1     Running   0          5h5m
+# kube-system    kube-apiserver-node1            1/1     Running   0          5h5m
+# kube-system    kube-controller-manager-node1   1/1     Running   2          5h5m
+# kube-system    kube-proxy-g878t                1/1     Running   0          5h5m
+# kube-system    kube-proxy-q2htw                1/1     Running   0          5h4m
+# kube-system    kube-proxy-s647v                1/1     Running   0          5h4m
+# kube-system    kube-scheduler-node1            1/1     Running   7          5h5m
